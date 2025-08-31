@@ -1,0 +1,29 @@
+name: ros_robot_controller
+description: "A new Flutter project."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  flutter_joystick: ^0.2.1
+
+  roslibdart:
+    git:
+      url: https://github.com/tmtong/roslibdart.git
+      ref: main
+  shared_preferences: ^2.2.2
+  provider: ^6.1.2   # ← ここを修正
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+
+flutter:
+  uses-material-design: true
