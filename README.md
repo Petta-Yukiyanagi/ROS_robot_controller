@@ -209,5 +209,3 @@ docker exec -it create-stack bash -lc ". /opt/ros/humble/setup.bash; ros2 topic 
 
 ---
 
-## ライセンス
-（ここにライセンス表記を記載）
