@@ -1,3 +1,4 @@
 {
-    "cmake.sourceDirectory": "C:/Users/user/Desktop/Flutter time/ros_robot_controller/linux/flutter"
+    "cmake.sourceDirectory": "C:/Users/user/Desktop/Flutter time/ros_robot_controller/linux/flutter",
+    "java.configuration.updateBuildConfiguration": "interactive"
 }

@@ -11,14 +11,17 @@ dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.8
-  flutter_joystick: ^0.2.1
+  flutter_joystick: ^0.2.2
 
-  roslibdart:
-    git:
-      url: https://github.com/tmtong/roslibdart.git
-      ref: main
-  shared_preferences: ^2.2.2
-  provider: ^6.1.2   # ← ここを修正
+  roslibdart: ^0.0.1-dev+4
+  shared_preferences: ^2.5.3
+  provider: ^6.1.2   # 竊・縺薙％繧剃ｿｮ豁｣
+  flutter_vlc_player: ^7.4.3
+  fl_chart: 0.68.0
+  video_player: ^2.10.0
+  video_player_web_hls: ^1.0.0+3
+  flutter_mjpeg: ^2.0.4
+  chewie: ^1.12.1
 
 dev_dependencies:
   flutter_test:
@@ -27,3 +30,4 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
