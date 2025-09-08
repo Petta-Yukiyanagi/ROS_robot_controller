@@ -1,262 +1,213 @@
-# ROS Robot Controller with Flutter + Roomba(Create2)
+# ROS Robot Controller（Roomba + ROS 2 Humble）
 
-このリポジトリは、**Flutter アプリ**から **iRobot Create2 (Roomba系) を USB 接続した Raspberry Pi** 経由で操作する手順をまとめたものです。  
-通信には **rosbridge_server (WebSocket)** を使用し、アプリから `/cmd_vel` を publish することでロボットを動かします。
-
----
-
-## システム構成
-
-```
-Flutter App (PC/Android/iOS)
-    ↓ ws://<PC or RPi>:9090 (WebSocket)
-rosbridge_server (Raspberry Pi 上)
-    ↓ ROS 2 Topic (/cmd_vel)
-create_driver (Raspberry Pi 上, USB経由でRoombaと接続)
-    ↓ UART (115200 baud)
-Roomba / iRobot Create2
-```
+Raspberry Pi 上の Docker コンテナで Roomba (Create 2) を ROS 2 Humble から制御するための一式です。  
+コンテナ起動後は **Launch が自動で走る**ため、手で `ros2 launch` を叩く必要はありません。  
+Flutter 製のコントローラーから `rosbridge_websocket` に接続し、`/cmd_vel` を送ると、スタックがゲートして `/cmd_vel_out` → `create_driver` に中継します。バッテリーは `/battery_state` で配信します。
 
 ---
 
-## 事前準備
+## Docker Image
 
-### 1. Raspberry Pi (Ubuntu 24.04 / ROS 2 Jazzy)
+- パッケージページ：  
+  👉 **ghcr.io/petta-yukiyanagi/ros_humble_lab**  
+  https://github.com/Petta-Yukiyanagi/ROS_robot_controller/pkgs/container/ros_humble_lab
 
-#### ROS 2 環境セットアップ
+### Pull
 ```bash
-sudo apt update
-sudo apt install ros-jazzy-desktop python3-colcon-common-extensions python3-rosdep git
-sudo rosdep init || true
-rosdep update
+docker pull ghcr.io/petta-yukiyanagi/ros_humble_lab:latest
+# 必要に応じて日付/バージョンタグも利用
+# docker pull ghcr.io/petta-yukiyanagi/ros_humble_lab:2025-09-07
 ```
 
-#### Create2 ドライバのビルド
+### Run（お試し）
 ```bash
-mkdir -p ~/ros2_ws/src
-cd ~/ros2_ws/src
-git clone -b ros2 https://github.com/AutonomyLab/create_robot.git
-git clone https://github.com/AutonomyLab/libcreate.git
-rosdep install --from-paths . --ignore-src -r -y
-
-cd ~/ros2_ws
-colcon build --symlink-install
+docker run -it --rm   --net=host   -v /run/udev:/run/udev:ro   --device /dev/ttyUSB0:/dev/roomba   ghcr.io/petta-yukiyanagi/ros_humble_lab:latest
 ```
 
-#### 環境設定
-```bash
-echo "source /opt/ros/jazzy/setup.bash" >> ~/.bashrc
-echo "source ~/ros2_ws/install/setup.bash" >> ~/.bashrc
-source ~/.bashrc
-```
+> 運用時は下記の **systemd 常駐**を使うと、電源投入 → 自動起動までノータッチになります。
 
 ---
 
-### 2. デバイス設定 (USB接続)
+## クイックスタート（Raspberry Pi 常駐）
 
-USB接続を確認：
+### 1) コンテナ常駐（ホスト OS の systemd）
+
+`/etc/systemd/system/create-stack.service`：
+```ini
+[Unit]
+Description=Roomba create-stack container
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStart=/usr/bin/docker run --rm --name create-stack   --net=host   -v /run/udev:/run/udev:ro   -v /opt/roomba-stack:/opt/roomba-stack:rw   -v /opt/overlay_ws:/opt/overlay_ws:rw   --device /dev/ttyUSB0:/dev/roomba   ghcr.io/petta-yukiyanagi/ros_humble_lab:latest
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### 2) コンテナ内で Launch を常駐
+
+`/etc/systemd/system/create-bringup.service`：
+```ini
+[Unit]
+Description=Roomba bringup (ros2 launch inside container)
+After=create-stack.service
+Requires=create-stack.service
+
+[Service]
+ExecStart=/usr/bin/docker exec create-stack bash -lc "\
+  . /opt/ros/humble/setup.bash; \
+  . /opt/overlay_ws/install/setup.bash; \
+  ros2 launch /opt/roomba-stack/launch/create_stack.launch.py \
+"
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+適用：
 ```bash
-ls -l /dev/ttyUSB* /dev/serial/by-id/
+sudo systemctl daemon-reload
+sudo systemctl enable --now create-stack.service create-bringup.service
 ```
 
-例：
-```
-/dev/ttyUSB0
-/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AV0L2E1F-if00-port0
-```
-
-推奨は **/dev/serial/by-id/...** を使用。
-
-ユーザーを `dialout` グループに追加（再ログイン必須）：
-```bash
-sudo usermod -a -G dialout $USER
-```
+> **旧式の個別サービス**（`create-driver.service` / `create-stack-manager.service`）は使用しません。重複起動の原因になります。
 
 ---
 
-### 3. Create2 ドライバ起動
+## モード（PASSIVE / SAFE）の基礎知識（初心者向け）
+
+Roomba Create 2 の公式 Open Interface には代表的に次のモードがあります。
+
+- **PASSIVE（パッシブ）**  
+  センサー取得や LED 制御は可能ですが、**走行コマンドには応答しません**。
+- **SAFE（セーフ）**  
+  **走行が可能**。段差や車輪落下などの危険検知でモーターが自動停止する安全機構が働きます。
+- **FULL（フル）**  
+  安全機構を無効化した完全制御（危険）。**本スタックでは使用しません**。
+
+本スタックでは **PASSIVE ↔ SAFE** を自動で切り替えます：
+
+- 起動直後は **PASSIVE**。  
+- `/cmd_vel` を受け取ると **非同期で SAFE 要求**を送信し、**待たずに即パススルー**で `/cmd_vel_out` を publish（操作の体感を最短化）。  
+- 入力が途切れて `idle_timeout_sec` を越えると **PASSIVE** に戻し、安全側に倒します。
+
+### supervisor トピック
+- `/supervisor/mode` (`std_msgs/UInt8`)：**2=SAFE, 3=PASSIVE**。**Transient Local**（最新値をラッチ配信）  
+- `/supervisor/active` (`std_msgs/Bool`)：**今まさに走行中か**のフラグ。**Transient Local**
+
+> Flutter 側でこの 2 つを表示しておくと、状態が一目で分かります。
+
+---
+
+## アーキテクチャ / ノード構成
+
+- **ホスト OS (Raspberry Pi)**  
+  - `create-stack.service`：Docker コンテナ常駐  
+  - `create-bringup.service`：コンテナ内で `ros2 launch` 実行
+
+- **コンテナ内（ghcr.io/petta-yukiyanagi/ros_humble_lab）**  
+  - ROS 2 Humble  
+  - **起動ノード**（Launch で一括起動）  
+    - `/create_driver`（C++：Roomba ドライバ）  
+    - `/create_stack_manager`（Python：統合・監督ノード）  
+    - `/rosbridge_websocket`（WS: 9090）  
+    - （任意）`/robot_state_publisher`
+
+### 主なトピック / サービス
+
+- 入力: `/cmd_vel`（Flutter → rosbridge → ここ）  
+- 中継: `/cmd_vel_out`（stack_manager が publish → create_driver が subscribe）  
+- 監督: `/supervisor/mode`, `/supervisor/active`（**TL**）  
+- バッテリー: `/battery_state`（`sensor_msgs/BatteryState`、**TL**）  
+- Services（driver 側）：  
+  - `/create/set_safe`（`std_srvs/Trigger`）  
+  - `/create/set_passive`（`std_srvs/Trigger`）
+
+### QoS（要点）
+- `/cmd_vel`：**BEST_EFFORT / VOLATILE**（低遅延重視）  
+- `/cmd_vel_out`：**RELIABLE / VOLATILE**  
+- `/supervisor/*` と `/battery_state`：**RELIABLE / TRANSIENT_LOCAL (depth=1)**
+
+---
+
+## create_stack_manager の挙動（流れ）
+
+1. `/cmd_vel` を受信 → **即** `/cmd_vel_out` へ中継（レスポンス重視）  
+2. 同時に **非同期で SAFE 要求**（サービス応答は待たない）  
+3. SAFE 確立時に **最後に受けた Twist を 1 回だけ再送**（単発入力でも動きやすく）  
+4. 入力が一定時間（`idle_timeout_sec`）ない → **PASSIVE 要求**（必要なら停止 Twist を一度だけ送出）  
+5. バッテリー `/battery/*` を合成して `/battery_state`（TL）を配信
+
+### 主なパラメータ（Launch 抜粋）
+```python
+ExecuteProcess(
+  cmd=[
+    'python3', '/opt/roomba-stack/nodes/create_stack_manager.py',
+    '--ros-args',
+    '-p', 'cmd_vel_in:=/cmd_vel',
+    '-p', 'cmd_vel_out:=/cmd_vel_out',
+    '-p', 'idle_timeout_sec:=3.0',
+    '-p', 'battery_publish_hz:=1.0',
+  ],
+  output='screen',
+)
+```
+- `idle_timeout_sec` … 途切れてから PASSIVE へ落とす秒数（**連続運転を重視**するなら大きめ推奨）  
+- `publish_zero_once_on_idle` … PASSIVE 移行時に停止 Twist を一度だけ送出  
+- `battery_publish_hz` … `/battery_state` 発行周期（既定 1.0 Hz）
+
+---
+
+## Flutter コントローラー（使い方）
+
+- 接続先：`ws://<raspi-ip>:9090`  
+- Publish：`/cmd_vel`（`geometry_msgs/Twist`）  
+  - **連続入力のときは 10–30 Hz** を目安に送信（操作が途切れにくい）  
+- Subscribe（UI に表示するのに便利）：  
+  - `/supervisor/mode`（2=SAFE, 3=PASSIVE）  
+  - `/supervisor/active`（走行中かどうか）  
+  - `/battery_state`（残量・電圧など）
+
+> “一瞬だけ動いて止まる” 場合は、1) アプリ側の送信周期が十分か、2) `idle_timeout_sec` が短すぎないか、を確認してください。
+
+---
+
+## よく使う確認コマンド
 
 ```bash
-ros2 launch create_bringup create_2.launch   port:=/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AV0L2E1F-if00-port0   baud:=115200
+# コンテナ稼働
+docker ps --format "table {{.Names}}	{{.Status}}"
+
+# デバイス（ホスト / コンテナ）
+ls -l /dev/ttyUSB0
+docker exec -it create-stack ls -l /dev/roomba
+
+# ノード / トピック
+docker exec -it create-stack bash -lc ". /opt/ros/humble/setup.bash; ros2 node list"
+docker exec -it create-stack bash -lc ". /opt/ros/humble/setup.bash; ros2 topic list"
+
+# QoS（TL の確認）
+docker exec -it create-stack bash -lc ". /opt/ros/humble/setup.bash; ros2 topic info /supervisor/mode -v"
+docker exec -it create-stack bash -lc ". /opt/ros/humble/setup.bash; ros2 topic info /supervisor/active -v"
+
+# rosbridge 9090
+docker exec -it create-stack bash -lc "ss -lntp | grep 9090 || echo 'no rosbridge'"
+
+# 経路：/cmd_vel → /cmd_vel_out
+docker exec -it create-stack bash -lc ". /opt/ros/humble/setup.bash; ros2 topic info /cmd_vel -v"
+docker exec -it create-stack bash -lc ". /opt/ros/humble/setup.bash; ros2 topic info /cmd_vel_out -v"
+
+# バッテリー
+docker exec -it create-stack bash -lc ". /opt/ros/humble/setup.bash; ros2 topic echo /battery_state --once"
 ```
-
----
-
-### 4. rosbridge_server 起動
-
-別ターミナルで：
-```bash
-ros2 run rosbridge_server rosbridge_websocket --port 9090
-```
-
----
-
-### 5. 接続確認
-
-```bash
-ros2 topic info /cmd_vel --verbose
-```
-
-- Publisher: `rosbridge_websocket`
-- Subscriber: `create_driver`
-
-となっていれば準備OK。
-
-動作テスト：
-```bash
-ros2 topic pub /cmd_vel geometry_msgs/Twist   "{linear: {x: 0.25, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}" -r 10
-```
-
----
-
-## Flutter アプリ側
-
-### 1. pubspec.yaml 依存関係
-```yaml
-dependencies:
-  flutter:
-    sdk: flutter
-  flutter_joystick: ^0.2.1
-  roslibdart:
-    git:
-      url: https://github.com/tmtong/roslibdart.git
-      ref: main
-  provider: ^6.1.5
-  shared_preferences: ^2.5.3
-```
-
-### 2. 接続設定
-アプリ起動 → 上部の **ROS Bridge IP Address** に接続先を入力。
-
-#### PCで動かす場合（SSHトンネルあり）
-```bash
-ssh -L 9090:localhost:9090 user@<raspi-ip>
-```
-アプリの接続先は：
-```
-ws://127.0.0.1:9090
-```
-
-#### スマホで動かす場合
-- Termius等で「Local Port Forward 9090 → localhost:9090」を設定し、同じく
-```
-ws://127.0.0.1:9090
-```
-
----
-
-## 操作方法
-
-- **Linear Speed / Angular Speed** のスライダで速度を調整
-- **D-pad**  
-  - 押している間 `/cmd_vel` を連続送信  
-- **ジョイスティック**  
-  - 倒している間 `/cmd_vel` を連続送信  
-  - 離すと停止
-- **Emergency Stop** ボタンで即停止
-
----
-
-## 注意事項
-
-- 充電ドックに載っている場合や、セーフティ（クリフ/バンパ/ESTOP）が反応している場合は `/cmd_vel` を無視します。
-- 安全な環境で動作確認してください。
-- 初回は必ず `ros2 topic pub` コマンドで動作確認してからアプリを使用してください。
-
----
-
-## トラブルシュート
-
-- `/cmd_vel` に Subscriber がいない → ドライバ起動コマンドを確認
-- Permission denied → `dialout` グループに追加したか確認
-- 動かないがSubscriberはいる → ドックから外す / 速度を0.25以上に上げる
-- 接続できない → SSHトンネル設定を再確認 (`ssh -L 9090:localhost:9090 ...`)
 
 ---
 
 ## ライセンス
-各依存リポジトリ（`create_robot`, `libcreate`, `roslibdart` など）のライセンスに準じます。
-
-
----
-
-## お手軽起動方法（ドライバや環境構築済み前提）
-
-### 1. Raspberry Pi 側（SSHログイン後）
-
-#### ROS環境の読み込み
-```bash
-source /opt/ros/jazzy/setup.bash
-source ~/ros2_ws/install/setup.bash
-```
-
-#### Create2 ドライバ起動
-```bash
-ros2 launch create_bringup create_2.launch   port:=/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AV0L2E1F-if00-port0   baud:=115200
-```
-
-#### rosbridge_server 起動（別ターミナル）
-```bash
-source /opt/ros/jazzy/setup.bash
-ros2 run rosbridge_server rosbridge_websocket --port 9090
-```
-
----
-
-### 2. Windows PC 側（PowerShell）
-
-#### SSHトンネルを張る
-```powershell
-ssh -L 9090:localhost:9090 user@<raspi-ip>
-```
-- `<raspi-ip>` はラズパイのIPアドレスに置き換えてください。  
-- 接続後は **PCローカルの127.0.0.1:9090 がラズパイのrosbridgeに直結**します。
-
----
-
-### 3. Flutter アプリ
-
-- 接続先を **`ws://127.0.0.1:9090`** に設定して **Connect** を押す。  
-- AppBar が緑色「Connected」になれば操作可能です。  
-- D-pad長押し、またはジョイスティックを倒すと `/cmd_vel` が送られてルンバが動きます。  
-- 停止は **Emergency Stop ボタン**。
-
----
-
-
----
-
-## 応用: スマホがラズパイと別LANにいる場合（PCと同じLANにいる場合）
-
-### 想定構成
-- **ラズパイ** … LAN A に接続、rosbridge_server を起動中  
-- **PC** … LAN A に接続してラズパイに SSH 可能  
-- **スマホ** … LAN B に接続（ラズパイには直接つながらない）、ただし PC と同じLAN内にいる  
-
-### 解決策: PC を中継する
-
-#### 1. PCでSSHトンネルを張る
-```powershell
-ssh -L 9090:localhost:9090 user@<raspi-ip>
-```
-これにより **PCのポート9090 → ラズパイのrosbridge(9090)** へ転送される。
-
-#### 2. PCのLAN内IPを調べる
-```powershell
-ipconfig
-```
-例: `192.168.20.50`
-
-#### 3. スマホのFlutterアプリで接続
-```
-ws://192.168.20.50:9090
-```
-を指定。  
-スマホ → PC:9090 → SSHトンネル → ラズパイ:9090 → rosbridge に接続できる。
-
-### 注意点
-- PCのファイアウォールでポート9090を開放する必要がある。  
-- SSHトンネルを張っているPowerShellは閉じないこと。  
-- PCが落ちると接続も切れる。
-
----
+（ここにライセンス表記を記載）
