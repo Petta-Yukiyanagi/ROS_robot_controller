@@ -129,6 +129,75 @@ Roomba Create 2 の公式 Open Interface には代表的に次のモードがあ
   - `/create/set_safe`（`std_srvs/Trigger`）  
   - `/create/set_passive`（`std_srvs/Trigger`）
 
+### システムアーキテクチャ図
+
+```mermaid
+---
+config:
+  layout: dagre
+---
+flowchart TB
+ subgraph Flutter["📱 Flutter App"]
+        FlutterApp["Mobile Interface"]
+  end
+ subgraph RaspberryPi["🖥️ Raspberry Pi Host OS"]
+        SystemService["System Service<br>Starts Docker Container"]
+  end
+ subgraph Top[" "]
+        Flutter
+        RaspberryPi
+  end
+ subgraph Nodes["ROS2 Nodes"]
+        WebSocketNode["🌐 rosbridge_websocket<br>Web Interface"]
+        ManagerNode["🧠 create_stack_manager<br>司令塔・状態管理"]
+        DriverNode["🔌 create_driver<br>Hardware Interface"]
+  end
+ subgraph Docker["🐳 Docker Container (ROS2)"]
+        RosLaunch["⏻ ros2 launch<br>Starts all nodes"]
+        Nodes
+  end
+ subgraph Roomba["🤖 Roomba"]
+        Hardware["Physical Robot"]
+  end
+    FlutterApp -- 操作コマンド<br>(Twist
+    Msg) --> WebSocketNode
+    WebSocketNode -- /cmd_vel --> ManagerNode
+    ManagerNode -- /cmd_vel_out --> DriverNode
+    DriverNode -- 📶 シリアル信号 --> Hardware
+    Hardware -- 🔋 センサーデータ --> DriverNode
+    DriverNode -- "/battery_state etc." --> ManagerNode
+    ManagerNode -- 状態データ --> WebSocketNode
+    WebSocketNode -- JSON --> FlutterApp
+    SystemService ==> RosLaunch
+    RosLaunch ==> Nodes
+     FlutterApp:::flutter
+     SystemService:::pi
+     WebSocketNode:::nodes
+     ManagerNode:::nodes
+     DriverNode:::nodes
+     RosLaunch:::launch
+     Hardware:::roomba
+    classDef flutter fill:#e3f2fd,stroke:#1976d2,stroke-width:2px
+    classDef pi fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px
+    classDef docker fill:#e8f5e8,stroke:#388e3c,stroke-width:2px
+    classDef roomba fill:#fff3e0,stroke:#f57c00,stroke-width:2px
+    classDef nodes fill:#f1f8e9,stroke:#689f38
+    classDef launch fill:#e0f2f1,stroke:#00695c
+    classDef invisible fill:transparent,stroke:transparent
+    linkStyle 0 stroke:#2196f3,stroke-width:3px,color:blue,fill:none
+    linkStyle 1 stroke:#2196f3,stroke-width:3px,color:blue,fill:none
+    linkStyle 2 stroke:#2196f3,stroke-width:3px,color:blue,fill:none
+    linkStyle 3 stroke:#2196f3,stroke-width:3px,color:blue,fill:none
+    linkStyle 4 stroke:#ff9800,stroke-width:2px,stroke-dasharray: 5 5,color:orange,fill:none
+    linkStyle 5 stroke:#ff9800,stroke-width:2px,stroke-dasharray: 5 5,color:orange,fill:none
+    linkStyle 6 stroke:#ff9800,stroke-width:2px,stroke-dasharray: 5 5,color:orange,fill:none
+    linkStyle 7 stroke:#ff9800,stroke-width:2px,stroke-dasharray: 5 5,color:orange,fill:none
+    linkStyle 8 stroke:#666,stroke-width:2px,color:grey,fill:none
+    linkStyle 9 stroke:#666,stroke-width:2px,color:grey,fill:none
+
+```
+
+
 ### QoS（要点）
 - `/cmd_vel`：**BEST_EFFORT / VOLATILE**（低遅延重視）  
 - `/cmd_vel_out`：**RELIABLE / VOLATILE**  
